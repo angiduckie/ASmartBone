@@ -1,4 +1,4 @@
---[[ SmartBone Version 0.1.2 by Celnak ]] --
+--[[ SmartBone Version 0.2.0 by Angi / ASmartBone modernization based on Celnak's 0.1.2 ]] --
 
 -- // Types \\ --
 
@@ -43,7 +43,7 @@ type particleTree = {
 	WindOffset: number,
 	Root: Bone,
 	RootPart: BasePart,
-	RootWorldToLocal: Vector3,
+	RootWorldToLocal: CFrame,
 	BoneTotalLength: number,
 	Particles: particleArray,
 	LocalCFrame: CFrame,
@@ -68,6 +68,9 @@ end
 -- // Constructors \\ --
 
 local ZERO = Vector3.zero
+local GENERATED_TAIL_ATTRIBUTE = "ASmartBoneGeneratedTail"
+local MAX_SUBSTEPS = 4
+local MAX_SUBSTEP_DELTA = 0.25
 
 -- // Dependencies \\ --
 
@@ -109,7 +112,7 @@ if DEBUG then
 	DEBUG_HIGHLIGHT.Enabled = true
 end
 
--- // Module \\ --
+-- // Module \ --
 
 local CurrentControllers = {}
 local module = {}
@@ -133,7 +136,8 @@ function module.new(rootPart: BasePart, rootList: array)
 	}, module)
 
 	for name, value in DefaultSettings do
-		self.Settings[name] = rootPart:GetAttribute(name) or value
+		local attributeValue = rootPart:GetAttribute(name)
+		self.Settings[name] = attributeValue ~= nil and attributeValue or value
 	end
 
 	self.Settings.BlendWeight = 1
@@ -154,23 +158,43 @@ function module:Init()
 	CurrentControllers[self.ID] = self
 
 	self.Connections["AttributeChanged"] = RootPart.AttributeChanged:ConnectParallel(function(Attribute: string)
-		if not self.Settings[Attribute] then return end
-		self:UpdateParameters(Attribute, RootPart:GetAttribute(Attribute))
+		if self.Settings[Attribute] == nil then return end
+		local value = RootPart:GetAttribute(Attribute)
+		self:UpdateParameters(Attribute, value)
 	end)
 
 	self.Connections["LightingAttributeChanged"] = Lighting.AttributeChanged:ConnectParallel(function(Attribute: string)
-		if not self.Settings[Attribute] then return end
-		self:UpdateParameters(Attribute, Lighting:GetAttribute(Attribute))
+		if self.Settings[Attribute] == nil then return end
+		local value = Lighting:GetAttribute(Attribute)
+		self:UpdateParameters(Attribute, value)
 	end)
 
+	-- Remove synthetic tail bones from a previous initialization before rebuilding the tree.
+	for _, descendant in RootPart:GetDescendants() do
+		if descendant:IsA("Bone") and descendant:GetAttribute(GENERATED_TAIL_ATTRIBUTE) == true then
+			descendant:Destroy()
+		end
+	end
+
 	for _, Bone in RootPart:GetDescendants() do
-		if Bone:IsA("Bone") and Bone.Parent:IsA("Bone") and #Bone:GetChildren() == 0 then
-			start = Bone.WorldCFrame
-				+ (Bone.WorldCFrame.UpVector.Unit * (Bone.WorldPosition - Bone.Parent.WorldPosition).Magnitude)
-			tailBone = Instance.new("Bone")
-			tailBone.Parent = Bone
-			tailBone.Name = Bone.Name .. "_Tail"
-			tailBone.WorldCFrame = start
+		if Bone:IsA("Bone") and Bone.Parent:IsA("Bone") then
+			local hasBoneChild = false
+			for _, child in Bone:GetChildren() do
+				if child:IsA("Bone") then
+					hasBoneChild = true
+					break
+				end
+			end
+
+			if not hasBoneChild then
+				start = Bone.WorldCFrame
+					+ (Bone.WorldCFrame.UpVector.Unit * (Bone.WorldPosition - Bone.Parent.WorldPosition).Magnitude)
+				tailBone = Instance.new("Bone")
+				tailBone.Parent = Bone
+				tailBone.Name = Bone.Name .. "_Tail"
+				tailBone:SetAttribute(GENERATED_TAIL_ATTRIBUTE, true)
+				tailBone.WorldCFrame = start
+			end
 		end
 	end
 
@@ -233,7 +257,8 @@ function module:AppendParticles(particleTree: dictionary, Bone: Bone, ParentInde
 end
 
 function module:UpdateParameters(setting, value)
-	if not self.Settings[setting] then return end
+	if DefaultSettings[setting] == nil then return end
+	value = value ~= nil and value or DefaultSettings[setting]
 	self.Settings[setting] = if SettingsMath[setting] then SettingsMath[setting](value) else value
 end
 
@@ -245,7 +270,7 @@ function module:PreUpdate(particleTree: particleTree)
 	particleTree.ObjectMove = (rootPart.Position - particleTree.ObjectPreviousPosition)
 	particleTree.ObjectPreviousPosition = rootPart.Position
 
-	particleTree.RestGravity = root.CFrame:PointToWorldSpace(particleTree.LocalGravity)
+	particleTree.RestGravity = root.WorldCFrame:VectorToWorldSpace(particleTree.LocalGravity)
 
 	for _, particle in particleTree.Particles do
 		particle.LastTransformOffset = particle.TransformOffset
@@ -263,9 +288,11 @@ function module:UpdateParticles(particleTree: particleTree, Delta: number, LoopI
 
 	local Damping = Settings.Damping
 	local Force = Settings.Gravity
-	local ForceDirection = Settings.Gravity.Unit
+	local ForceDirection = Settings.Gravity.Magnitude > 0 and Settings.Gravity.Unit or ZERO
 
-	local ProjectedForce = ForceDirection * math.max(particleTree.RestGravity:Dot(ForceDirection), 0)
+	local ProjectedForce = Settings.Gravity.Magnitude > 0
+		and ForceDirection * math.max(particleTree.RestGravity:Dot(ForceDirection), 0)
+		or ZERO
 
 	Force -= ProjectedForce
 	Force = (Force + Settings.Force) * (self.ObjectScale * Delta)
@@ -279,19 +306,20 @@ function module:UpdateParticles(particleTree: particleTree, Delta: number, LoopI
 		if particle.ParentIndex >= 1 and particle.Anchored == false then
 			windMove = ZERO
 
-			if Settings.WindInfluence > 0 then
+			if Settings.WindInfluence > 0 and particle.BoneLength > 0 then
 				timeModifier = particleTree.WindOffset
 					+ (os.clock() - (particle.HeirarchyLength / 5))
 					+ (
 						((particle.TransformOffset.Position - particleTree.Root.WorldPosition).Magnitude / 5)
 						* Settings.WindInfluence
 					)
+
 				windMove = Vector3.new(
 					Settings.WindDirection.X
 						+ (Settings.WindDirection.X * (math.sin(timeModifier * Settings.WindSpeed))),
 					Settings.WindDirection.Y + (0.05 * (math.sin(timeModifier * Settings.WindSpeed))),
 					Settings.WindDirection.Z
-						+ (Settings.WindDirection.X * (math.sin(timeModifier * Settings.WindSpeed)))
+						+ (Settings.WindDirection.Z * (math.sin(timeModifier * Settings.WindSpeed)))
 				)
 
 				windMove /= particle.BoneLength
@@ -385,7 +413,7 @@ function module:SkipUpdateParticles(particleTree: particleTree)
 				point.Position += difference * ((length - restLength) / length)
 			end
 		else
-			point.LastPosition = point.TransformOffset.Position--point.Bone.WorldPosition
+			point.LastPosition = point.TransformOffset.Position--particle.Bone.WorldPosition
 			point.Position = point.TransformOffset.Position
 		end
 	end
@@ -464,8 +492,13 @@ function module:RunLoop(particleTree: particleTree, Delta: number, UpdateRate: n
 	end
 
 	if ready then
-		self:UpdateParticles(particleTree, timeVar, 0)
-		self:CorrectParticles(particleTree, timeVar)
+		local substeps = math.min(MAX_SUBSTEPS, math.max(1, math.ceil(timeVar / MAX_SUBSTEP_DELTA)))
+		local substepDelta = timeVar / substeps
+
+		for substep = 1, substeps do
+			self:UpdateParticles(particleTree, substepDelta, substep == 1 and 0 or 1)
+			self:CorrectParticles(particleTree, substepDelta)
+		end
 	else
 		self:SkipUpdateParticles(particleTree)
 	end
@@ -576,39 +609,45 @@ function module.Start()
 	end
 
 	local function removeSmartBoneObject(Object: BasePart)
-		if SmartBones[Object] then
-			DebugPrint("Removing SmartBone Object with ID: " .. SmartBones[Object].ID)
-			task.spawn(function()
-				for _, Connection in pairs(SmartBones[Object].Connections) do
-					Connection:Disconnect()
+		local SBone = SmartBones[Object]
+		if not SBone then return end
+
+		DebugPrint("Removing SmartBone Object with ID: " .. SBone.ID)
+		SmartBones[Object] = nil
+
+		for _, Connection in pairs(SBone.Connections) do
+			Connection:Disconnect()
+		end
+
+		if SBone.SimulationConnection then
+			SBone.SimulationConnection:Disconnect()
+		end
+
+		for _, particleTree: particleTree in ipairs(SBone.ParticleTrees) do
+			for _, _Particle in particleTree.Particles do
+				if _Particle.DebugPart then
+					_Particle.DebugPart:Destroy()
 				end
 
-				SmartBones[Object].SimulationConnection:Disconnect()
-
-				task.wait()
-
-				SmartBones[Object].RemovedEvent:Destroy()
-
-				for _, particleTree: particleTree in ipairs(SmartBones[Object].ParticleTrees) do
-					for _, _Particle in particleTree.Particles do
-						for _, Recycling in _Particle.RecyclingBin do
-							Recycling:Destroy()
-						end
+				for _, Recycling in _Particle.RecyclingBin do
+					if Recycling then
+						Recycling:Destroy()
 					end
 				end
-
-				task.wait()
-
-				if CurrentControllers[SmartBones[Object].ID] then
-					CurrentControllers[SmartBones[Object].ID] = nil
-				end
-
-				SmartBones[Object].Removed = true
-				SmartBones[Object].RemovedEvent:Fire()
-
-				SmartBones[Object] = nil
-			end)
+			end
 		end
+
+		-- Synthetic tails are implementation details; never leave them in the rig after removal.
+		for _, descendant in SBone.RootPart:GetDescendants() do
+			if descendant:IsA("Bone") and descendant:GetAttribute(GENERATED_TAIL_ATTRIBUTE) == true then
+				descendant:Destroy()
+			end
+		end
+
+		CurrentControllers[SBone.ID] = nil
+		SBone.Removed = true
+		SBone.RemovedEvent:Fire()
+		SBone.RemovedEvent:Destroy()
 	end
 
 	CollectionService:GetInstanceAddedSignal("SmartBone"):Connect(registerSmartBoneObject)
