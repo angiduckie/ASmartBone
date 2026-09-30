@@ -42,32 +42,7 @@ local CameraUtil = require(Dependencies:WaitForChild("CameraUtil"))
 
 
 local DEBUG = Config.Debug
-
-local timeFunc = os.clock
-local oldTime = timeFunc()
-local frameRate = 60
-local frameRateTable = {}
-
---[[ Local Functions ]] --
-
-local round = 1000
-
-local function roundNumber(num)
-	return  math.floor((num * round) + 0.5) / round
-end
-
-local function smoothDelta()
-	local currentTime = timeFunc()
-
-	for index = #frameRateTable,1,-1 do
-		frameRateTable[index + 1] = (frameRateTable[index] >= currentTime - 1) and frameRateTable[index] or nil
-	end
-
-	frameRateTable[1] = currentTime
-	frameRate =  math.floor((timeFunc() - oldTime >= 1 and #frameRateTable) or (#frameRateTable / (timeFunc() - oldTime)))
-
-	return roundNumber(frameRate * ((1/frameRate)^2) + .001)
-end
+local MAX_FRAME_DELTA = 1 / 15
 
 local function Initialize(Object: BasePart, RootList: array)
 	local SBone = SmartBone.new(Object, RootList)
@@ -75,10 +50,13 @@ local function Initialize(Object: BasePart, RootList: array)
 	local frameTime = 0
 
 	SBone.SimulationConnection = RunService.Heartbeat:ConnectParallel(function(Delta: number)
-		Delta = smoothDelta()
-		frameTime += Delta
+		Delta = math.min(Delta, MAX_FRAME_DELTA)
+		frameTime = math.min(frameTime + Delta, 1)
 
-		local camPosition = workspace.CurrentCamera.CFrame.Position
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+
+		local camPosition = camera.CFrame.Position
 		local rootPosition = SBone.RootPart.Position
 		local throttleDistance = SBone.Settings.ThrottleDistance
 		local distance = (camPosition - rootPosition).Magnitude
@@ -90,10 +68,14 @@ local function Initialize(Object: BasePart, RootList: array)
 		local UpdateRate = math.floor(math.clamp(updateThrottle * SBone.Settings.UpdateRate, 1, SBone.Settings.UpdateRate))
 
 		local WithinViewport = CameraUtil.WithinViewport(SBone.RootPart)
-		if frameTime >= (1/UpdateRate) then
+		local frameInterval = 1 / UpdateRate
+		if frameTime >= frameInterval then
 			if distance < activationDistance and WithinViewport then
 				Delta = frameTime
-				frameTime = 0
+				frameTime -= frameInterval
+				if frameTime > frameInterval then
+					frameTime = frameInterval
+				end
 
 				debug.profilebegin("SmartBone")
 
