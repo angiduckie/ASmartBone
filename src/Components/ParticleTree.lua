@@ -15,7 +15,7 @@ function module.new(Root: Bone, RootPart: Instance, Gravity: Vector3)
 		Particles = {},
 
 		LocalCFrame = Root.WorldCFrame,
-		LocalGravity = Root.CFrame:PointToWorldSpace(Gravity).Unit * Gravity.Magnitude,
+		LocalGravity = Root.WorldCFrame:VectorToObjectSpace(Gravity),
 		Force = Vector3.zero,
 		RestGravity = Vector3.zero,
 		ObjectMove = Vector3.zero,
